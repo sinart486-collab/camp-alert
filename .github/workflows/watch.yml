@@ -1,0 +1,103 @@
+name: 캠핑 빈자리 감시
+
+on:
+  schedule:
+    - cron: "4,19,34,49 * * * *"   # 15분마다 (정각은 GitHub이 붐벼서 살짝 비켜요)
+  workflow_dispatch:
+    inputs:
+      what:
+        description: "무엇을 할까요?"
+        type: choice
+        default: "지금 빈자리 보기"
+        options:
+          - "지금 빈자리 보기"
+          - "비 오는 날 추천"
+          - "한 번 감시하기"
+          - "연결 시험"
+
+permissions:
+  contents: read
+  actions: write   # 지난 기억(state) 정리용
+
+concurrency:
+  group: camp-watch
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Seoul
+  CAMP_CLOUD: "1"
+  PYTHONUTF8: "1"
+  CAMP_WEBHOOK: ${{ secrets.CAMP_WEBHOOK }}
+  FOREST_ID: ${{ secrets.FOREST_ID }}
+  FOREST_PW: ${{ secrets.FOREST_PW }}
+  KID_LABEL: ${{ secrets.KID_LABEL }}
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 프로그램 준비
+        run: pip install -r requirements.txt
+
+      - name: 브라우저 준비 (저장해 둔 것 쓰기)
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: 브라우저 처음 설치
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: python -m playwright install --with-deps chromium
+
+      - name: 브라우저 부품 확인
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: python -m playwright install-deps chromium
+
+      - name: 지난 기억 불러오기
+        id: state
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            state.json
+            log.txt
+          key: camp-state-${{ github.run_id }}
+          restore-keys: camp-state-
+
+      - name: 처음이면 집 컴퓨터 기억으로 시작
+        run: |
+          if [ ! -f state.json ]; then cp state_seed.json state.json; echo "집 컴퓨터 기억으로 시작"; fi
+
+      - name: 빈자리 확인
+        run: |
+          case "${{ github.event.inputs.what }}" in
+            "지금 빈자리 보기") python camp_alert.py now ;;
+            "비 오는 날 추천")  python camp_alert.py rain ;;
+            "연결 시험")        python camp_alert.py test ;;
+            *)                  python camp_alert.py cloud ;;
+          esac
+
+      - name: 기억 저장
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            state.json
+            log.txt
+          key: camp-state-${{ github.run_id }}
+
+      - name: 오래된 기억 정리
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list --key camp-state- --sort created_at --order desc --limit 100 --json id -q '.[5:][].id' \
+            | xargs -r -n1 gh cache delete || true
