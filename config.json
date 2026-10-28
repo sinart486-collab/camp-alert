@@ -1,0 +1,25 @@
+{
+  "weekdays": [
+    4,
+    5,
+    6
+  ],
+  "holiday_eve": true,
+  "extra_holidays": [],
+  "weeks": 6,
+  "categories": [
+    "02"
+  ],
+  "regions": [
+    "부산",
+    "울산",
+    "경남",
+    "경상남",
+    "경북",
+    "경상북",
+    "대구"
+  ],
+  "interval_minutes": 15,
+  "heartbeat_hour": 8,
+  "tier_version": 1
+}
