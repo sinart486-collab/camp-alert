@@ -1038,8 +1038,8 @@ def pick_reasons(rs: list[str], limit: int = 3) -> list[str]:
 
 
 def card_badges(tier: str, rare: bool, deal: bool, side: str, far: bool) -> str:
-    """제목 앞에 붙는 그림 표시: 🔔=알림, 🚗=차 옆, ⭐=꼭 가볼 곳, 💰=특가, 💎=귀한 자리, 📅=미리 알림."""
-    return "🔔" + ("🚗" if side == "yes" else "") + ("⭐" if tier == "S" else "") + ("💰" if deal else "") + ("💎" if rare else "") + ("📅" if far else "")
+    """제목 앞에 붙는 그림 표시: 🚗=차 옆, ⭐=꼭 가볼 곳, 💰=특가, 💎=귀한 자리, 📅=미리 알림."""
+    return ("🚗" if side == "yes" else "") + ("⭐" if tier == "S" else "") + ("💰" if deal else "") + ("💎" if rare else "") + ("📅" if far else "")
 
 
 def build_card(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]], ctx: dict[str, Any],
@@ -1057,7 +1057,7 @@ def build_card(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]], ctx:
     lines: list[tuple[int, str]] = []
     if mention:
         lines.append((0, mention))
-    lines.append((0, f"# {card_badges(tier, rare, deal, side, far_all)} {name}"))
+    lines.append((0, f"# {(card_badges(tier, rare, deal, side, far_all) + ' ').lstrip()}{name}"))
     by_date: dict[str, list[str]] = {}
     for i in its:
         by_date.setdefault(i["use_dt"], []).append(i["name"])
@@ -1197,7 +1197,7 @@ def format_special(items: list[dict[str, Any]], holidays: set[str] | None = None
         lines.append(f"👉 서둘러 예약하세요: {SITE_URL}")
         msgs.append("\n".join(lines))
     if light:
-        lines = ["## 🔔 괜찮은 자리가 났어요", "-# 급하진 않아요. 시간 될 때 보세요"]
+        lines = ["## 괜찮은 자리가 났어요", "-# 급하진 않아요. 시간 될 때 보세요"]
         for forest, its in list(light.items())[:6]:
             if ctx:
                 lines.append(build_light_line(cfg, forest, its, ctx, holidays))
