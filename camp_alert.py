@@ -1003,7 +1003,7 @@ def reason_lines(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]], ct
         else:
             out.append("같은 날 다른 좋은 휴양림은 모두 만석이에요 (여기가 거의 유일해요)")
     if its[0].get("deal"):
-        out.append("💰 특가: " + its[0]["why"].split(" / ")[0])
+        out.append("💲 특가: " + its[0]["why"].split(" / ")[0])
     n_sites = len({i["name"] + i["use_dt"] for i in its})
     out.append(f"지금 {n_sites}곳만 남았어요. 인기 있는 날은 몇 분 안에 사라질 수 있어요")
     return out
@@ -1023,14 +1023,14 @@ def weather_short(cfg: dict[str, Any], fc: dict[str, list[Any]], use_dt: str) ->
 def price_short(prof: dict[str, Any], fac: list[str]) -> str:
     if prof.get("요금"):
         t = re.sub(r"\([^)]*\)", "", prof["요금"]).split(", ")[0].strip()
-        return "💵 " + t[:26]
+        return "요금 " + t[:26]
     line = next((l for l in fac if "원" in l), "")
-    return ("💵 " + line[:24]) if line else ""
+    return ("요금 " + line[:24]) if line else ""
 
 
 def pick_reasons(rs: list[str], limit: int = 3) -> list[str]:
     """'왜 지금?'에 넣을 이유를 중요한 것부터 limit개만 골라요 (이미 위에 나온 내용은 뺐어요)."""
-    skip = ("꼭 가볼", "좋은 곳(", "💰", "지금 ")
+    skip = ("꼭 가볼", "좋은 곳(", "💲", "지금 ")
     rs = [r for r in rs if not r.startswith(skip)]
     rank = lambda r: 0 if ("일요일" in r or "토요일" in r or "금요일" in r or "쉬는 날" in r) else (
         1 if ("만이에요" in r or "방금" in r or "처음" in r) else (2 if "다른 좋은" in r else 3))
@@ -1038,8 +1038,8 @@ def pick_reasons(rs: list[str], limit: int = 3) -> list[str]:
 
 
 def card_badges(tier: str, rare: bool, deal: bool, side: str, far: bool) -> str:
-    """제목 앞에 붙는 그림 표시: 🚗=차 옆, ⭐=꼭 가볼 곳, 💰=특가, 💎=귀한 자리, 📅=미리 알림."""
-    return ("🚗" if side == "yes" else "") + ("⭐" if tier == "S" else "") + ("💰" if deal else "") + ("💎" if rare else "") + ("📅" if far else "")
+    """제목 앞에 붙는 그림 표시: 🚗=차 옆, ⭐=꼭 가볼 곳, 💲=특가, 💎=귀한 자리, 📅=미리 알림."""
+    return ("🚗" if side == "yes" else "") + ("⭐" if tier == "S" else "") + ("💲" if deal else "") + ("💎" if rare else "") + ("📅" if far else "")
 
 
 def build_card(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]], ctx: dict[str, Any],
@@ -1081,7 +1081,7 @@ def build_card(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]], ctx:
         good = tier_why if tier_why and "참고 의견" not in tier_why else (prof.get("한줄") or "")
         box.append(("⭐ **꼭 가볼 곳**" if tier == "S" else "👍 **좋은 곳**") + (f" · {good}" if good else ""))
     if deal:
-        box.append("💰 **특가** · " + its[0]["why"].split(" / ")[0])
+        box.append("💲 **특가** · " + its[0]["why"].split(" / ")[0])
     if rare:
         box.append("💎 **귀한 자리** · 평소엔 거의 안 나는 곳이에요")
     lines.append((0, "\n".join("> " + b for b in box)))
@@ -1145,7 +1145,7 @@ def build_light_line(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]]
     dates = sorted({i["use_dt"] for i in its})[:2]
     side = car_side(prof, [i["name"] for i in its])[0]
     tier = tier_of(forest, ctx["tiers"], cfg.get("vip_forests", []))[0]
-    badge = ("🚗" if side == "yes" else "") + ("⭐" if tier == "S" else "") + ("💎" if its[0]["rare"] else "") + ("📅" if all(i.get("far") for i in its) else "")
+    badge = ("🚗" if side == "yes" else "") + ("⭐" if tier == "S" else "") + ("💲" if its[0].get("deal") else "") + ("💎" if its[0]["rare"] else "") + ("📅" if all(i.get("far") for i in its) else "")
     mins = prof.get("분") or region_minutes(its[0].get("region", ""))
     bits = [", ".join(pretty_date(d) for d in dates)]
     if mins:
@@ -1184,7 +1184,7 @@ def format_special(items: list[dict[str, Any]], holidays: set[str] | None = None
         title = "미리 챙기세요! 계획 세울 만한 자리예요" if far_all else "지금 가세요! 놓치면 아까워요"
         lines = [f"{mention + ' ' if mention else ''}🔔🔔 **{title}** {forest}"]
         if its[0].get("deal"):
-            lines.append("💰 특가예요!")
+            lines.append("💲 특가예요!")
         if its[0]["rare"]:
             lines.append("💎 평소엔 거의 자리가 안 나는 곳이에요")
         if its[0]["why"]:
