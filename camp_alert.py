@@ -799,6 +799,9 @@ def alert_level(cfg: dict[str, Any], state: dict[str, Any], fid: str, info: dict
             level = 2                                  # 좋은 곳이 평소엔 안 나다 났다 = 보석
         if tier == "S" and dr == 3 and not rare:
             level = 1                                  # 금요일 S는 가볍게 (일·토가 우선)
+    if cfg.get("car_priority", True) and tier == "A" and level == 1 and (dr <= 2 or eve) and car_flag(info) == "yes":
+        level = 2                                       # 좋은 곳 + 차를 바로 옆에 대는 자리 = 세게 (B등급은 올리지 않아요)
+        why = "차를 사이트 바로 옆에 댈 수 있어요" + (" / " + why if why else "")
     deal, deal_txt = deal_info(cfg, state, fid, info)
     if deal:
         level = max(level, 2 if dr <= 2 or eve else 1)
@@ -848,6 +851,35 @@ def find_info(forest: str, infos: dict[str, dict[str, Any]]) -> dict[str, Any]:
         if key in forest:
             return v
     return {}
+
+
+CAR_WORDS = ("오토", "자동차", "차량")
+_INFOS_CACHE: dict[str, dict[str, Any]] | None = None
+
+
+def car_side(prof: dict[str, Any], names: list[str], fac: list[str] | None = None) -> tuple[str, str]:
+    """차를 사이트 바로 옆에 댈 수 있는지. ('yes'=옆에 대요, 'some'=일부만, 'no'=주차장에서 짐 옮겨요, 'unknown'=모름, 설명)
+    판단 순서: 사이트 이름에 '오토' → 내가 정리한 휴양림 정보('차옆') → 숲나들e 공식 안내 글."""
+    auto = [n for n in names if any(w in n for w in CAR_WORDS)]
+    if auto:
+        return "yes", f"사이트 이름에 '오토캠핑'이 들어 있어요({auto[0]}). 차를 사이트 바로 옆에 대는 구조예요"
+    mark = (prof or {}).get("차옆")
+    if mark in ("예", "일부", "아니오"):
+        return {"예": "yes", "일부": "some", "아니오": "no"}[mark], (prof.get("차옆메모") or prof.get("차") or "")
+    txt = " ".join(fac or [])
+    if re.search(r"(사이트|데크)\s*(바로\s*)?(옆|앞)\s*(에\s*)?(주차|차량)|차량\s*(진입|접근)\s*(이\s*)?가능|오토\s*캠핑", txt):
+        return "yes", "숲나들e 안내에 차량 진입(오토캠핑) 설명이 있어요"
+    if re.search(r"주차장에서\s*(도보|걸어|카트|리어카)|차량\s*(진입|접근)\s*(이\s*)?(불가|금지)|도보\s*\d+\s*분", txt):
+        return "no", "숲나들e 안내상 주차장에서 걸어서 짐을 옮겨야 해요"
+    return "unknown", ""
+
+
+def car_flag(info: dict[str, Any]) -> str:
+    """알림 세기 계산용: 이 자리가 차를 바로 옆에 대는 자리인지 (이름·정리해 둔 정보만 봐요)."""
+    global _INFOS_CACHE
+    if _INFOS_CACHE is None:
+        _INFOS_CACHE = load_info()
+    return car_side(find_info(info.get("forest", ""), _INFOS_CACHE), [info.get("name", "")])[0]
 
 
 def site_kind(name: str) -> str:
@@ -1007,14 +1039,23 @@ def build_card(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]], ctx:
         if price_line:
             lines.append((1, f"💰 요금(숲나들e 안내): {price_line}"))
     car = prof.get("차")
+    side, side_why = car_side(prof, [i["name"] for i in its], fac)
+    if side == "yes":
+        lines.append((0, "🚗🔌 **차를 사이트 바로 옆에 대요.** 짐 내리기 쉽고, 너무 춥거나 더우면 차 안에서 쉬거나 영상도 볼 수 있어요. 전기차 V2L도 쓰기 좋아요" + (f"\n   → {side_why}" if side_why else "")))
+    elif side == "some":
+        lines.append((0, "🚗 **일부 사이트만 차를 가까이 댈 수 있어요.** " + (side_why or "예약 화면에서 사이트를 확인하세요")))
+    elif side == "no":
+        lines.append((1, "🚶 차는 주차장에 두고 짐을 걸어서 옮겨야 해요. 카트가 있으면 편해요. " + (side_why or "")))
+    else:
+        lines.append((1, "🚗 차를 사이트 옆에 댈 수 있는지는 아직 확인 못 했어요. '오토캠핑' 표시가 없는 데크는 주차장에서 걸어야 할 수 있어요. 예약 화면에서 확인하세요"))
     mins = prof.get("분")
     est = ""
     if not mins:
         mins = region_minutes(its[0].get("region", ""))
         est = " (지역 기준 추정)" if mins else ""
-    go = f"🚗 진해에서 약 {mins}분{est if est else ' (대략)'}" if mins else ""
-    if go or car:
-        lines.append((1, go + (" · " if go and car else "") + (f"차: {car}" if car else "")))
+    go = f"🛣 진해에서 약 {mins}분{est if est else ' (대략)'}" if mins else ""
+    if go or (car and side == "unknown"):
+        lines.append((1, go + (" · " if go and car and side == "unknown" else "") + (f"차: {car}" if car and side == "unknown" else "")))
     wt, tips = weather_text(cfg, fc, first)
     if wt:
         lines.append((1, wt))
@@ -1074,6 +1115,8 @@ def build_light_line(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]]
     dates = sorted({i["use_dt"] for i in its})[:2]
     tag = "💎" if its[0]["rare"] else ""
     early = " 📅미리" if all(i.get("far") for i in its) else ""
+    if car_side(prof, [i["name"] for i in its])[0] == "yes":
+        early += " 🚗차옆"
     bits = [", ".join(pretty_date(d, holidays) for d in dates)]
     mins = prof.get("분") or region_minutes(its[0].get("region", ""))
     if mins:
