@@ -999,14 +999,47 @@ def reason_lines(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]], ct
     if tier in ("S", "A"):
         if others:
             names = ", ".join(sorted(others)[:3])
-            out.append(f"같은 날 열린 다른 S·A 휴양림: {len(others)}곳 ({names})")
+            out.append(f"같은 날 열린 다른 좋은 휴양림: {len(others)}곳 ({names})")
         else:
-            out.append("같은 날 다른 S·A 휴양림은 모두 만석이에요 (이곳이 사실상 유일해요)")
+            out.append("같은 날 다른 좋은 휴양림은 모두 만석이에요 (여기가 거의 유일해요)")
     if its[0].get("deal"):
         out.append("💰 특가: " + its[0]["why"].split(" / ")[0])
     n_sites = len({i["name"] + i["use_dt"] for i in its})
     out.append(f"지금 {n_sites}곳만 남았어요. 인기 있는 날은 몇 분 안에 사라질 수 있어요")
     return out
+
+
+def weather_short(cfg: dict[str, Any], fc: dict[str, list[Any]], use_dt: str) -> str:
+    v = fc.get(use_dt)
+    if not v:
+        return ""
+    icon = "☔" if is_rainy(cfg, fc, use_dt) else "☀️"
+    txt = f"{icon} 비 올 확률 {int(v[0])}%"
+    if len(v) > 3 and v[2] is not None and v[3] is not None:
+        txt += f" · {v[3]:.0f}~{v[2]:.0f}℃"
+    return txt
+
+
+def price_short(prof: dict[str, Any], fac: list[str]) -> str:
+    if prof.get("요금"):
+        t = re.sub(r"\([^)]*\)", "", prof["요금"]).split(", ")[0].strip()
+        return "💵 " + t[:26]
+    line = next((l for l in fac if "원" in l), "")
+    return ("💵 " + line[:24]) if line else ""
+
+
+def pick_reasons(rs: list[str], limit: int = 3) -> list[str]:
+    """'왜 지금?'에 넣을 이유를 중요한 것부터 limit개만 골라요 (이미 위에 나온 내용은 뺐어요)."""
+    skip = ("꼭 가볼", "좋은 곳(", "💰", "지금 ")
+    rs = [r for r in rs if not r.startswith(skip)]
+    rank = lambda r: 0 if ("일요일" in r or "토요일" in r or "금요일" in r or "쉬는 날" in r) else (
+        1 if ("만이에요" in r or "방금" in r or "처음" in r) else (2 if "다른 좋은" in r else 3))
+    return sorted(rs, key=rank)[:limit]
+
+
+def card_badges(tier: str, rare: bool, deal: bool, side: str, far: bool) -> str:
+    """제목 앞에 붙는 그림 표시: 🔔=알림, 🚗=차 옆, ⭐=꼭 가볼 곳, 💰=특가, 💎=귀한 자리, 📅=미리 알림."""
+    return "🔔" + ("🚗" if side == "yes" else "") + ("⭐" if tier == "S" else "") + ("💰" if deal else "") + ("💎" if rare else "") + ("📅" if far else "")
 
 
 def build_card(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]], ctx: dict[str, Any],
@@ -1015,92 +1048,89 @@ def build_card(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]], ctx:
     prof = find_info(forest, infos)
     fid = its[0].get("fid", "")
     far_all = all(i.get("far") for i in its)
-    title = "미리 챙기세요! 계획 세울 만한 자리예요" if far_all else "지금 가세요! 놓치면 아까워요"
     name = prof.get("이름", forest)
-    lines: list[tuple[int, str]] = [(0, f"{mention + ' ' if mention else ''}🔔🔔 **{title}** {name}")]
-    if prof.get("한줄"):
-        lines.append((2, prof["한줄"]))
+    tier, tier_why = tier_of(forest, ctx["tiers"], cfg.get("vip_forests", []))
+    fac = fetch_facility(ctx.get("session"), fid, state)
+    side, side_why = car_side(prof, [i["name"] for i in its], fac)
+    deal = bool(its[0].get("deal"))
+    rare = bool(its[0].get("rare"))
+    lines: list[tuple[int, str]] = []
+    if mention:
+        lines.append((0, mention))
+    lines.append((0, f"# {card_badges(tier, rare, deal, side, far_all)} {name}"))
     by_date: dict[str, list[str]] = {}
     for i in its:
         by_date.setdefault(i["use_dt"], []).append(i["name"])
     first = sorted(by_date)[0]
     for use_dt in sorted(by_date)[:3]:
-        lines.append((0, f"📅 {pretty_date(use_dt, holidays)} 1박 · {sites_text(by_date[use_dt])}"))
-    lines.append((2, f"🕗 {ctx['now'].strftime('%H:%M')}에 새로 올라온 자리예요"))
-    lines.append((0, "**왜 지금 가야 하나요?**"))
-    for r in reason_lines(cfg, forest, its, ctx, holidays, prof):
-        lines.append((0 if r.startswith(("꼭", "좋은", "💰")) else 1, "・" + r))
-    # 요금·거리·차
-    fac = fetch_facility(ctx.get("session"), fid, state)
-    if prof.get("요금"):
-        lines.append((1, f"💰 요금: {prof['요금']}"))
-    else:
-        price_line = next((l for l in fac if "원" in l), "")
-        if price_line:
-            lines.append((1, f"💰 요금(숲나들e 안내): {price_line}"))
-    car = prof.get("차")
-    side, side_why = car_side(prof, [i["name"] for i in its], fac)
+        n = len(by_date[use_dt])
+        lines.append((0, f"**{pretty_date(use_dt, holidays)} 1박** · {site_kind(by_date[use_dt][0])} {n}곳 남음"))
+    if far_all:
+        lines.append((0, "📅 미리 알려드려요. 계획 세울 만한 자리예요"))
+    # 한눈에 보는 핵심 (인용 상자)
+    box: list[str] = []
     if side == "yes":
-        lines.append((0, "🚗🔌 **차를 사이트 바로 옆에 대요.** 짐 내리기 쉽고, 너무 춥거나 더우면 차 안에서 쉬거나 영상도 볼 수 있어요. 전기차 V2L도 쓰기 좋아요" + (f"\n   → {side_why}" if side_why else "")))
+        box.append("🚗 **차를 바로 옆에 대요** · 짐 내리기 쉽고, 차 안 휴식·영상·전기(V2L) OK")
     elif side == "some":
-        lines.append((0, "🚗 **일부 사이트만 차를 가까이 댈 수 있어요.** " + (side_why or "예약 화면에서 사이트를 확인하세요")))
+        box.append("🚗 **일부 자리만 차를 가까이 대요**" + ((" · " + side_why[:70]) if side_why else ""))
     elif side == "no":
-        lines.append((1, "🚶 차는 주차장에 두고 짐을 걸어서 옮겨야 해요. 카트가 있으면 편해요. " + (side_why or "")))
+        box.append("🚶 차는 주차장에, 짐은 걸어서 옮겨요 (카트 있으면 편해요)")
     else:
-        lines.append((1, "🚗 차를 사이트 옆에 댈 수 있는지는 아직 확인 못 했어요. '오토캠핑' 표시가 없는 데크는 주차장에서 걸어야 할 수 있어요. 예약 화면에서 확인하세요"))
+        box.append("🚗 차 옆 주차 여부는 아직 몰라요" + ((" · " + prof["차"][:60]) if prof.get("차") else " (예약 화면에서 확인)"))
+    if tier in ("S", "A"):
+        good = tier_why if tier_why and "참고 의견" not in tier_why else (prof.get("한줄") or "")
+        box.append(("⭐ **꼭 가볼 곳**" if tier == "S" else "👍 **좋은 곳**") + (f" · {good}" if good else ""))
+    if deal:
+        box.append("💰 **특가** · " + its[0]["why"].split(" / ")[0])
+    if rare:
+        box.append("💎 **귀한 자리** · 평소엔 거의 안 나는 곳이에요")
+    lines.append((0, "\n".join("> " + b for b in box)))
+    # 거리·요금·날씨 한 줄
     mins = prof.get("분")
     est = ""
     if not mins:
         mins = region_minutes(its[0].get("region", ""))
-        est = " (지역 기준 추정)" if mins else ""
-    go = f"🛣 진해에서 약 {mins}분{est if est else ' (대략)'}" if mins else ""
-    if go or (car and side == "unknown"):
-        lines.append((1, go + (" · " if go and car and side == "unknown" else "") + (f"차: {car}" if car and side == "unknown" else "")))
-    wt, tips = weather_text(cfg, fc, first)
-    if wt:
-        lines.append((1, wt))
-        for t in tips:
-            lines.append((2, "   → " + t))
-    if prof.get("경치"):
-        lines.append((2, f"🏞 {prof['경치']}"))
+        est = " 쯤" if mins else ""
+    info_bits = [b for b in (f"🛣 진해 {mins}분{est}" if mins else "", price_short(prof, fac), weather_short(cfg, fc, first)) if b]
+    if info_bits:
+        lines.append((1, " · ".join(info_bits)))
+    _, tips = weather_text(cfg, fc, first)
+    if tips:
+        lines.append((2, "🧥 " + tips[0]))
+    # 왜 지금?
+    why = pick_reasons(reason_lines(cfg, forest, its, ctx, holidays, prof))
+    if why:
+        lines.append((1, "\n**왜 지금?**\n" + "\n".join("・" + r for r in why)))
     kid = cfg.get("kid_label") or "아이"
     with_kid = kid + ("이랑" if (ord(kid[-1]) - 0xAC00) % 28 else "랑") if "가" <= kid[-1] <= "힣" else kid + "와"
     if prof.get("아이"):
-        lines.append((2, f"👧 {with_kid} 가면: {prof['아이']}"))
+        lines.append((2, f"👧 {with_kid}: {prof['아이'][:70]}"))
     names_all = [n for v in by_date.values() for n in v]
-    for m in site_memos(prof, names_all)[:2]:
+    for m in site_memos(prof, names_all)[:1]:
         lines.append((2, f"🔌 {m}"))
-    if prof.get("시설"):
-        lines.append((3, f"🚿 시설: {prof['시설']}"))
-    for w in prof.get("주의", [])[:3]:
+    for w in prof.get("주의", [])[:2]:
         lines.append((2, f"⚠️ {w}"))
     if fac and not prof:
-        lines.append((2, "📋 숲나들e 공식 안내 요약:"))
-        for l in fac[:5]:
-            lines.append((2, "   ・" + l))
-    if prof.get("근처"):
-        lines.append((3, "📍 근처: " + ", ".join(prof["근처"])))
+        lines.append((3, "📋 숲나들e 안내: " + " / ".join(fac[:3])))
     last, days = free_cancel_date(first)
     today_s = ctx["now"].strftime("%Y%m%d")
     free_ok = datetime.strptime(first, "%Y%m%d") - timedelta(days=days) >= datetime.strptime(today_s, "%Y%m%d")
-    if free_ok:
-        lines.append((1, f"✅ 먼저 예약해 두세요. {last}까지는 수수료 없이 취소할 수 있어요 (블로그 정리 기준, 시설마다 다를 수 있어요)"))
-    else:
-        lines.append((1, "⚠️ 이미 무료 취소 기간이 지났어요. 확실히 가실 때만 예약하세요"))
+    lines.append((1, f"✅ {last}까지 무료 취소 (먼저 잡아두세요)" if free_ok else "⚠️ 무료 취소 기간이 지났어요. 확실할 때만 예약하세요"))
     url, exact = book_url(state, fid, first)
-    lines.append((0, f"🔎 사진·시설 자세히 보기(로그인 필요 없음): {detail_url(fid)}" if fid else f"🔎 {SITE_URL}"))
+    links = []
     if fid:
-        if exact:
-            lines.append((0, f"🛒 바로 예약하기: {url}"))
-        else:
-            lines.append((0, f"🛒 예약하기('일반예약' 화면): {url}\n   → [{name}] 에서 {pretty_date(first, holidays)} 1박을 고르세요"))
-        lines.append((1, f"💳 예약한 뒤 꼭 결제까지! 결제 대기 내역: {pay_url(fid, state)}"))
+        links.append(f"[🔎 사진·시설]({detail_url(fid)})")
+        links.append(f"[🛒 예약하기]({url})")
+        links.append(f"[💳 결제 확인]({pay_url(fid, state)})")
     else:
-        lines.append((0, f"🛒 예약하기: {RSRVT_PAGE}\n   → [{name}] 에서 {pretty_date(first, holidays)} 1박을 고르세요"))
+        links.append(f"[🛒 예약하기]({RSRVT_PAGE})")
+    lines.append((0, "\n" + " ｜ ".join(links)))
+    if not exact:
+        lines.append((1, f"-# 예약하기를 누른 뒤 [{name}]에서 {pretty_date(first)} 1박을 고르세요. 예약하고 나면 꼭 결제까지!"))
     if prof.get("확신"):
-        lines.append((3, f"(정보 확신: {prof['확신']})"))
+        lines.append((3, f"-# 정보 확신: {prof['확신'].strip()}"))
     if not prof and not fac:
-        lines.append((3, "ℹ️ 이 휴양림의 경치·아이·차 대기 정보는 아직 정리 중이에요. Claude에게 '이 휴양림 정리해줘'라고 하면 채워 드려요"))
+        lines.append((3, "-# 이 휴양림의 자세한 정보는 아직 정리 중이에요"))
         log(f"상세정보 없음(휴양림정보.json에 없는 곳): {forest}")
     for drop in (4, 3, 2, 1):
         text = "\n".join(t for _, t in lines)
@@ -1113,27 +1143,25 @@ def build_card(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]], ctx:
 def build_light_line(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]], ctx: dict[str, Any], holidays: set[str]) -> str:
     prof = find_info(forest, ctx["infos"])
     dates = sorted({i["use_dt"] for i in its})[:2]
-    tag = "💎" if its[0]["rare"] else ""
-    early = " 📅미리" if all(i.get("far") for i in its) else ""
-    if car_side(prof, [i["name"] for i in its])[0] == "yes":
-        early += " 🚗차옆"
-    bits = [", ".join(pretty_date(d, holidays) for d in dates)]
+    side = car_side(prof, [i["name"] for i in its])[0]
+    tier = tier_of(forest, ctx["tiers"], cfg.get("vip_forests", []))[0]
+    badge = ("🚗" if side == "yes" else "") + ("⭐" if tier == "S" else "") + ("💎" if its[0]["rare"] else "") + ("📅" if all(i.get("far") for i in its) else "")
     mins = prof.get("분") or region_minutes(its[0].get("region", ""))
+    bits = [", ".join(pretty_date(d) for d in dates)]
     if mins:
-        bits.append(f"진해 약 {mins}분")
+        bits.append(f"진해 {mins}분")
     if prof.get("요금"):
-        bits.append(prof["요금"].split(" (")[0])
-    wt, _ = weather_text(cfg, ctx["fc"], dates[0])
-    if wt:
-        bits.append(wt.replace("날씨 예보: ", ""))
-    rs = reason_lines(cfg, forest, its, ctx, holidays, prof)
-    rs = [r for r in rs if not r.startswith("지금 ")][:2]
-    fid = its[0].get("fid", "")
-    line = f"・**{forest}**{tag}{early} : " + " · ".join(bits)
+        bits.append(re.sub(r"\([^)]*\)", "", prof["요금"]).split(", ")[0].strip()[:26])
+    w = weather_short(cfg, ctx["fc"], dates[0])
+    if w:
+        bits.append(w)
+    line = f"**{badge + ' ' if badge else ''}{prof.get('이름', forest)}**\n   " + " · ".join(bits)
+    rs = pick_reasons(reason_lines(cfg, forest, its, ctx, holidays, prof), 1)
     if rs:
-        line += "\n   └ " + " / ".join(rs)
+        line += "\n   " + rs[0]
+    fid = its[0].get("fid", "")
     if fid:
-        line += f"\n   🔎 {detail_url(fid)}\n   🛒 {book_url(ctx['state'], fid, dates[0])[0]}"
+        line += f"\n   [🔎 사진]({detail_url(fid)}) ｜ [🛒 예약]({book_url(ctx['state'], fid, dates[0])[0]})"
     return line
 
 
@@ -1169,7 +1197,7 @@ def format_special(items: list[dict[str, Any]], holidays: set[str] | None = None
         lines.append(f"👉 서둘러 예약하세요: {SITE_URL}")
         msgs.append("\n".join(lines))
     if light:
-        lines = ["🔔 **괜찮은 자리가 났어요** (시간 되면 보세요)"]
+        lines = ["## 🔔 괜찮은 자리가 났어요", "-# 급하진 않아요. 시간 될 때 보세요"]
         for forest, its in list(light.items())[:6]:
             if ctx:
                 lines.append(build_light_line(cfg, forest, its, ctx, holidays))
@@ -1180,7 +1208,12 @@ def format_special(items: list[dict[str, Any]], holidays: set[str] | None = None
                 lines.append(f"・{forest}{tag}{early} : " + ", ".join(pretty_date(d, holidays) for d in dates))
         if not ctx:
             lines.append(f"👉 {RSRVT_PAGE}")
-        msgs.append("\n".join(lines)[:1900])
+        out_text = "\n".join(lines[:2])
+        for item in lines[2:]:
+            if len(out_text) + len(item) + 2 > 1900:
+                break
+            out_text += "\n\n" + item
+        msgs.append(out_text[:1900])
     return msgs
 
 
