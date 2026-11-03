@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import html as htmllib
 import json
 import os
@@ -92,7 +93,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "holiday_within_days": 30,     # 쉬는 날 앞날 밤은 이 날짜 안쪽이면 취소표로 봐요
     "strong_mention": "@everyone", # 세게 알릴 때 글 맨 앞에 붙이는 말 (비우면 안 붙임)
     "vip_forests": [],             # 늘 귀하게 칠 휴양림 이름 일부 (예: ["용지봉", "대운산"])
-    "digest": True,                # 일요일 밤 '갈 수 있는 곳 전부'를 아침에 알려주기
+    "strict_alerts": True,         # True = 🚗차 바로 옆 + (⭐2개 이상 또는 💎 또는 💲)일 때만 알려요
+    "daily_max": 2,                # 하루에 알리는 휴양림 수 (넘치면 가장 좋은 것만)
+    "digest": False,               # (끔) 일요일 밤 '갈 수 있는 곳 전부' 목록. 필요하면 true
     "digest_weekday": 6,           # 6 = 일요일 (토요일 아침에는 '내일 밤', 일요일 아침에는 '오늘 밤')
     "heartbeat_hour": 8,           # 매일 이 시각 이후 '잘 돌아가고 있어요' 알림
 }
@@ -656,10 +659,13 @@ REVIEW_HALF_LIFE_DAYS = 365
 
 def load_tiers() -> dict[str, Any]:
     """휴양림등급.json(처음 의견) + 후기모음.json(후기)을 읽어요. 매번 다시 읽으니 파일만 바꿔도 바로 적용돼요."""
-    out: dict[str, Any] = {"S": {}, "A": {}, "R": []}
+    out: dict[str, Any] = {"S": {}, "A": {}, "R": [], "별": {}}
     try:
         data = json.loads((BASE / "휴양림등급.json").read_text(encoding="utf-8"))
         out["S"], out["A"] = dict(data.get("S", {})), dict(data.get("A", {}))
+        for k, v in dict(data.get("별", {})).items():
+            if isinstance(v, (list, tuple)) and v:
+                out["별"][k] = (int(v[0]), str(v[1]) if len(v) > 1 else "")
     except Exception:
         pass
     try:
@@ -776,6 +782,35 @@ def day_rank(use_dt: str, holidays: set[str]) -> tuple[int, bool]:
     return {6: 1, 5: 2, 4: 3}.get(d.weekday(), 4), eve
 
 
+STAR_LABEL = {1: "좋은 곳", 2: "꼭 가볼 곳", 3: "무조건 가세요"}
+
+
+def star_info(cfg: dict[str, Any], forest: str, tiers: dict[str, Any]) -> tuple[int, str]:
+    """(별 개수 0~3, 이유).  휴양림등급.json의 '별' 표가 기본이고, 믿을 만한 후기가 쌓이면 4.3점 이상 +1, 3.3점 미만 -1."""
+    for v in cfg.get("vip_forests", []) or []:
+        if v and v in forest:
+            return 3, "내가 찜한 곳"
+    stars, why = 0, ""
+    for key, (n, w) in (tiers.get("별") or {}).items():
+        if key in forest:
+            stars, why = n, w
+            break
+    else:
+        tier, w = tier_of(forest, tiers, cfg.get("vip_forests", []))
+        stars, why = {"S": 2, "A": 1}.get(tier, 0), w
+    score, conf, n = review_score(forest, tiers.get("R") or [])
+    if n and conf >= 1.5:
+        if score >= 4.3:
+            stars += 1
+        elif score < 3.3:
+            stars -= 1
+    return max(0, min(stars, 3)), why
+
+
+def star_count(cfg: dict[str, Any], forest: str, tiers: dict[str, Any]) -> int:
+    return star_info(cfg, forest, tiers)[0]
+
+
 def alert_level(cfg: dict[str, Any], state: dict[str, Any], fid: str, info: dict[str, Any],
                 today_s: str, holidays: set[str], tiers: dict[str, dict[str, str]]) -> tuple[int, str, bool]:
     """(알림 세기 0=기록만 1=가볍게 2=세게, 이유, 평소 잘 안 나는 곳인지).  이미 지난 날짜나 너무 먼 날짜는 0."""
@@ -790,6 +825,16 @@ def alert_level(cfg: dict[str, Any], state: dict[str, Any], fid: str, info: dict
     tier, why = tier_of(info["forest"], tiers, cfg.get("vip_forests", []))
     n, o = state.get("hist", {}).get(fid, [0, 0])
     rare = n >= int(cfg.get("min_history", 24)) and (o / n) <= float(cfg.get("rare_ratio", 0.3))
+    if cfg.get("strict_alerts", True):
+        # 기준: ⭐⭐⭐(무조건 가세요)는 차 표시 없어도 알림. 그 밖에는 🚗(차 바로 옆)여야 하고, 별 2개 이상이거나 별 1개 이상인 곳의 💎·💲일 때만.
+        stars = star_count(cfg, info["forest"], tiers)
+        deal, deal_txt = deal_info(cfg, state, fid, info)
+        car = car_flag(info) == "yes"
+        if far:       # 멀리 있는 날짜는 평범한 예약 오픈일 수 있어서 💎나 💲일 때만
+            ok = (deal or rare) and stars >= 1 and (car or stars >= 3)
+        else:
+            ok = (dr <= 3 or eve) and (stars >= 3 or (car and (stars >= 2 or ((rare or deal) and stars >= 1))))
+        return (2, deal_txt if deal else "", rare) if ok else (0, "", rare)
     if tier == "B":
         level = 1 if (rare and dr <= 2) else 0       # 등급 낮아도 평소 거의 안 나는 곳이 주말에 나면 가볍게
     else:
@@ -826,14 +871,15 @@ def pick_special(cfg: dict[str, Any], state: dict[str, Any], new_pairs, today_s:
         fid = key.split("|", 1)[0]
         level, why, rare = alert_level(cfg, state, fid, info, today_s, holidays, tiers)
         if level > 0 and cfg.get("rain_mode", True) and info["use_dt"] in state.get("rainy_dates", []):
-            # 비 오는 날 밤은 S 등급(또는 특가)만 알려요. 나머지는 기록만.
-            if tier_of(info["forest"], tiers, cfg.get("vip_forests", []))[0] != "S" and not deal_info(cfg, state, fid, info)[0]:
+            # 비 오는 날 밤은 ⭐⭐⭐(또는 특가)만 알려요. 나머지는 기록만.
+            if star_count(cfg, info["forest"], tiers) < 3 and not deal_info(cfg, state, fid, info)[0]:
                 level = 0
         if level > 0:
             dr, eve = day_rank(info["use_dt"], holidays)
             days_left = (datetime.strptime(info["use_dt"], "%Y%m%d") - datetime.strptime(today_s, "%Y%m%d")).days
             lim = int(cfg.get("holiday_within_days", 30)) if eve else int(cfg.get("special_within_days", 10))
             out.append(dict(info, level=level, why=why, rare=rare, dr=dr, eve=eve, far=days_left > lim, days_left=days_left,
+                            stars=star_count(cfg, info["forest"], tiers),
                             deal=deal_info(cfg, state, fid, info)[0]))
     return out
 
@@ -1022,7 +1068,8 @@ def weather_short(cfg: dict[str, Any], fc: dict[str, list[Any]], use_dt: str) ->
 def price_short(prof: dict[str, Any], fac: list[str]) -> str:
     if prof.get("요금"):
         t = re.sub(r"\([^)]*\)", "", prof["요금"]).split(", ")[0].strip()
-        return "요금 " + t[:26]
+        t = re.sub(r"(으?로 )?표시(돼요|됨|돼요\.)?$", "", t).strip()
+        return "요금 " + t[:20]
     line = next((l for l in fac if "원" in l), "")
     return ("요금 " + line[:24]) if line else ""
 
@@ -1050,93 +1097,75 @@ def pick_reasons(rs: list[str], limit: int = 2) -> list[str]:
     return sorted(rs, key=rank)[:limit]
 
 
-def card_badges(tier: str, rare: bool, deal: bool, side: str, far: bool) -> str:
-    """제목 앞 그림: 🚗=차를 바로 옆에 댐, ⭐=꼭 가볼 곳, 💎=귀한 자리(평소 만석), 💲=특가. (이 4가지만 써요)"""
-    return ("🚗" if side == "yes" else "") + ("⭐" if tier == "S" else "") + ("💎" if rare else "") + ("💲" if deal else "")
+def card_badges(tier: str, rare: bool, deal: bool, side: str, far: bool, stars: int | None = None) -> str:
+    """제목 앞 그림: 🚗=차를 바로 옆에 댐, ⭐=별 1~3개, 💎=귀한 자리(평소 만석), 💲=특가. (이 4가지만 써요)"""
+    n = stars if stars is not None else (2 if tier == "S" else 0)
+    return ("🚗" if side == "yes" else "") + "⭐" * n + ("💎" if rare else "") + ("💲" if deal else "")
 
 
 def build_card(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]], ctx: dict[str, Any],
                holidays: set[str], mention: str) -> str:
+    """알림 카드: 한눈에 읽히게 최소한만. 제목(🚗⭐💎) → 날짜 → 한 줄 이유 → 한 줄 정보 → 버튼 → 작은 글씨 한 줄."""
     state, fc, infos, now = ctx["state"], ctx["fc"], ctx["infos"], ctx["now"]
     prof = find_info(forest, infos)
     fid = its[0].get("fid", "")
     name = prof.get("이름", forest)
-    tier, tier_why = tier_of(forest, ctx["tiers"], cfg.get("vip_forests", []))
     fac = fetch_facility(ctx.get("session"), fid, state)
     side, side_why = car_side(prof, [i["name"] for i in its], fac)
     deal = bool(its[0].get("deal"))
+    rare = bool(its[0].get("rare"))
+    stars, star_why = star_info(cfg, forest, ctx["tiers"])
+    stars = max(stars, int(its[0].get("stars") or 0))
+    far_all = all(i.get("far") for i in its)
     lines: list[tuple[int, str]] = []
     if mention:
         lines.append((0, mention))
-    rare = bool(its[0].get("rare"))
-    badges = card_badges(tier, rare, deal, side, False)
+    lines.append((0, "**미리 잡아두세요!**" if far_all else "**꼭 가셔야 해요!**"))
+    badges = card_badges("", rare, deal, side, False, stars)
     lines.append((0, f"# {badges + ' ' if badges else ''}{name}"))
     by_date: dict[str, list[str]] = {}
     for i in its:
         by_date.setdefault(i["use_dt"], []).append(i["name"])
     first = sorted(by_date)[0]
-    for use_dt in sorted(by_date)[:3]:
-        n = len(by_date[use_dt])
-        lines.append((0, f"**{pretty_date(use_dt, holidays)} 1박 · {dday(use_dt, now)}** · {site_kind(by_date[use_dt][0])} {n}곳 남음"))
+    for use_dt in sorted(by_date)[:2]:
+        lines.append((0, f"**{pretty_date(use_dt, holidays)} 1박 · {dday(use_dt, now)}** · {site_kind(by_date[use_dt][0])} {len(by_date[use_dt])}곳"))
     box: list[str] = []
+    if stars >= 1:
+        good = star_why if star_why and "참고 의견" not in star_why else (prof.get("한줄") or "")
+        box.append("⭐" * stars + f" **{STAR_LABEL.get(stars, '')}**" + (f" · {short_text(good, 30)}" if good else ""))
     if side == "yes":
-        box.append("🚗 **차를 바로 옆에 대요** · 짐·차 안 쉬기·V2L OK")
+        box.append("🚗 **차를 바로 옆에 대요**")
     elif side == "some":
-        box.append("🚗 **일부만 차를 가까이 대요**" + ((" · " + side_why[:40]) if side_why else ""))
-    elif side == "no":
-        box.append("🚶 차는 주차장에, 짐은 걸어서 옮겨요")
-    if tier == "S":
-        good = tier_why if tier_why and "참고 의견" not in tier_why else (prof.get("한줄") or "")
-        box.append("⭐ **꼭 가볼 곳**" + (f" · {short_text(good)}" if good else ""))
-    elif tier == "A":
-        good = tier_why if tier_why and "참고 의견" not in tier_why else (prof.get("한줄") or "")
-        box.append("👍 **좋은 곳**" + (f" · {short_text(good)}" if good else ""))
+        box.append("🚗 일부만 차를 가까이 대요")
     if rare:
-        n_h, o_h = (state.get("hist") or {}).get(fid, [0, 0])
-        box.append("💎 **귀한 자리** · 평소엔 거의 만석이에요" + (f" (자리 있던 시간 {int(100 * o_h / n_h)}%)" if n_h else ""))
+        box.append("💎 **귀한 자리** · 평소엔 거의 만석")
     if deal:
         box.append("💲 **특가** · " + its[0]["why"].split(" / ")[0])
     if box:
         lines.append((0, "\n".join("> " + b for b in box)))
-    if side == "unknown":
-        lines.append((2, "-# 🚗 차 옆에 댈 수 있는지는 아직 확인 못 했어요"))
     mins = prof.get("분")
     est = ""
     if not mins:
         mins = region_minutes(its[0].get("region", ""))
         est = " 쯤" if mins else ""
-    info_bits = [b for b in (price_short(prof, fac), f"진해 {mins}분{est}" if mins else "", weather_short(cfg, fc, first)) if b]
+    info_bits = [b for b in (f"진해 {mins}분{est}" if mins else "", price_short(prof, fac), weather_short(cfg, fc, first)) if b]
     if info_bits:
         lines.append((1, " · ".join(info_bits)))
-    _, tips = weather_text(cfg, fc, first)
-    if tips:
-        lines.append((2, "-# 🧥 " + tips[0]))
-    why = pick_reasons([r for r in reason_lines(cfg, forest, its, ctx, holidays, prof) if not (rare and r.startswith("평소엔"))])
-    if why:
-        lines.append((1, "**왜 지금?**\n" + "\n".join("・" + r for r in why)))
-    cautions = prof.get("주의", [])[:1]
-    for w in cautions:
-        lines.append((2, f"⚠️ {w}"))
-    if fac and not prof:
-        lines.append((3, "-# 숲나들e 안내: " + " / ".join(fac[:2])))
-    last, days = free_cancel_date(first)
-    today_s = now.strftime("%Y%m%d")
-    free_ok = datetime.strptime(first, "%Y%m%d") - timedelta(days=days) >= datetime.strptime(today_s, "%Y%m%d")
-    lines.append((1, f"✅ {last}까지 무료 취소" if free_ok else "⚠️ 무료 취소 기간이 지났어요"))
-    url, exact = book_url(state, fid, first)
+    url, _ = book_url(state, fid, first)
     links = []
     if fid:
-        links.append(f"[🔎 사진·시설]({detail_url(fid)})")
-        links.append(f"[🛒 예약하기]({url})")
-        links.append(f"[💳 결제 확인]({pay_url(fid, state)})")
+        links += [f"[🔎 사진]({detail_url(fid)})", f"[🛒 예약]({url})", f"[💳 결제]({pay_url(fid, state)})"]
     else:
-        links.append(f"[🛒 예약하기]({RSRVT_PAGE})")
-    lines.append((0, "\n" + " ｜ ".join(links)))
-    if not exact:
-        lines.append((1, f"-# 예약하기 → 숲나들e에서 [{name}] {pretty_date(first)} 고르기 → 예약 뒤 꼭 결제까지!"))
-    if not prof and not fac:
-        log(f"상세정보 없음(휴양림정보.json에 없는 곳): {forest}")
-    for drop in (4, 3, 2, 1):
+        links.append(f"[🛒 예약]({RSRVT_PAGE})")
+    lines.append((0, " ｜ ".join(links)))
+    last, days = free_cancel_date(first)
+    free_ok = datetime.strptime(first, "%Y%m%d") - timedelta(days=days) >= datetime.strptime(now.strftime("%Y%m%d"), "%Y%m%d")
+    small = [f"✅ {last}까지 무료 취소" if free_ok else "⚠️ 무료 취소 기간 지남", "예약 뒤 꼭 결제까지!"]
+    cautions = prof.get("주의", [])[:1]
+    if cautions:
+        small.append("⚠️ " + short_text(cautions[0], 24))
+    lines.append((0, "-# " + " · ".join(small)))
+    for drop in (2, 1):
         text = "\n".join(t for _, t in lines)
         if len(text) <= 1900:
             return text
@@ -1149,7 +1178,7 @@ def build_light_line(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]]
     dates = sorted({i["use_dt"] for i in its})[:2]
     side = car_side(prof, [i["name"] for i in its])[0]
     tier = tier_of(forest, ctx["tiers"], cfg.get("vip_forests", []))[0]
-    badge = card_badges(tier, bool(its[0].get("rare")), bool(its[0].get("deal")), side, False)
+    badge = card_badges(tier, bool(its[0].get("rare")), bool(its[0].get("deal")), side, False, int(its[0].get("stars") or 0))
     mins = prof.get("분") or region_minutes(its[0].get("region", ""))
     bits = [", ".join(pretty_date(d) for d in dates)]
     if mins:
@@ -1165,6 +1194,27 @@ def build_light_line(cfg: dict[str, Any], forest: str, its: list[dict[str, Any]]
     if fid:
         line += f"\n   [🔎 사진]({detail_url(fid)}) ｜ [🛒 예약]({book_url(ctx['state'], fid, dates[0])[0]})"
     return line
+
+
+def apply_daily_cap(cfg: dict[str, Any], state: dict[str, Any], items: list[dict[str, Any]], today_s: str) -> list[dict[str, Any]]:
+    """하루에 알리는 휴양림 수를 daily_max(기본 2)로 제한해요. 넘치면 가장 좋은 것(별·💎·💲·가까운 일요일 순)만 보내요."""
+    cap = int(cfg.get("daily_max", 2))
+    sent = state.setdefault("alerts_sent", {})
+    for k in [k for k in sent if k < (datetime.strptime(today_s, "%Y%m%d") - timedelta(days=7)).strftime("%Y%m%d")]:
+        sent.pop(k, None)
+    done = set(sent.get(today_s, []))
+    by_forest: dict[str, list[dict[str, Any]]] = {}
+    for it in items:
+        if it.get("fid", it["forest"]) not in done:
+            by_forest.setdefault(it.get("fid", it["forest"]), []).append(it)
+    score = lambda its: (-(max(i.get("stars", 0) for i in its) + (1 if any(i.get("rare") for i in its) else 0)
+                           + (2 if any(i.get("deal") for i in its) else 0)), min(i["dr"] for i in its), min(i["days_left"] for i in its))
+    ranked = sorted(by_forest.items(), key=lambda kv: score(kv[1]))
+    keep = ranked[:max(0, cap - len(done))]
+    for fid, its in ranked[len(keep):]:
+        log(f"오늘 알림 한도({cap}곳)라서 기록만: {its[0]['forest']}")
+    sent[today_s] = sorted(done | {fid for fid, _ in keep})
+    return [i for _, its in keep for i in its]
 
 
 def format_special(items: list[dict[str, Any]], holidays: set[str] | None = None, mention: str = "",
@@ -1217,6 +1267,83 @@ def format_special(items: list[dict[str, Any]], holidays: set[str] | None = None
             out_text += "\n\n" + item
         msgs.append(out_text[:1900])
     return msgs
+
+
+# ---------------------------------------------------------------- 현황판 (알림 없이 눌러서 보는 한 장)
+def format_board(cfg: dict[str, Any], found: dict[str, dict[str, Any]], tiers: dict[str, Any], infos: dict[str, dict[str, Any]],
+                 now: datetime, holidays: set[str]) -> str:
+    """지금 열려 있는 자리 중 '볼 만한 것'만 한 장으로 정리해요. 이 글은 새로 올라오지 않고 같은 글이 계속 고쳐져요(알림 없음)."""
+    today_s = now.strftime("%Y%m%d")
+    groups: dict[str, dict[str, Any]] = {}
+    for info in found.values():
+        dr, eve = day_rank(info["use_dt"], holidays)
+        left = (datetime.strptime(info["use_dt"], "%Y%m%d") - datetime.strptime(today_s, "%Y%m%d")).days
+        if left < 0 or left > int(cfg.get("holiday_within_days", 30)) or not (dr <= 3 or eve):
+            continue
+        g = groups.setdefault(info["forest"], {"fid": info.get("fid", ""), "dates": {}, "names": []})
+        g["dates"].setdefault(info["use_dt"], []).append(info["name"])
+        g["names"].append(info["name"])
+    car_rows, other_rows = [], []
+    for forest, g in groups.items():
+        prof = find_info(forest, infos)
+        stars = star_count(cfg, forest, tiers)
+        auto_dates = sorted(d for d, ns in g["dates"].items() if car_side(prof, ns)[0] == "yes")
+        row = dict(forest=prof.get("이름", forest), fid=g["fid"], stars=stars,
+                   first=min(g["dates"]), n=sum(len(v) for v in g["dates"].values()))
+        if auto_dates:
+            if stars >= 1:
+                row.update(dates=auto_dates[:2], kind="오토캠핑", n=sum(len(g["dates"][d]) for d in auto_dates), car=True)
+                car_rows.append(row)
+        if not auto_dates and stars >= 1:
+            ds = sorted(g["dates"])[:2]
+            row.update(dates=ds, kind=site_kind(g["dates"][ds[0]][0]), car=False)
+            other_rows.append(row)
+    key = lambda r: (-r["stars"], r["first"])
+
+    def line(r: dict[str, Any]) -> str:
+        badge = ("🚗" if r["car"] else "") + "⭐" * r["stars"]
+        name = f"[{r['forest']}](<{detail_url(r['fid'])}>)" if r["fid"] else r["forest"]
+        return f"・{badge + ' ' if badge else ''}{name} · {', '.join(pretty_date(d) for d in r['dates'])} · {r['kind']} {r['n']}곳"
+
+    lines = [f"## 📋 지금 열려 있는 자리  ({now.strftime('%m/%d %H:%M')} 기준)",
+             "-# 알림은 안 와요. 필요할 때 눌러서 보세요 · 15분마다 새로 고쳐져요"]
+    lines.append("")
+    lines.append("**🚗 차를 바로 옆에 대는 자리**")
+    lines += [line(r) for r in sorted(car_rows, key=key)[:6]] or ["-# 지금은 없어요"]
+    lines.append("")
+    lines.append("**⭐ 별 있는 곳 (차 옆인지는 몰라요)**")
+    lines += [line(r) for r in sorted(other_rows, key=key)[:6]] or ["-# 지금은 없어요"]
+    return "\n".join(lines)[:1900]
+
+
+def update_board(cfg: dict[str, Any], state: dict[str, Any], text: str) -> None:
+    """현황판 글을 처음 한 번만 올리고, 그다음부터는 같은 글을 고쳐요. 내용이 그대로면 아무것도 안 해요."""
+    board = state.setdefault("board", {})
+    body = hashlib.md5(text.encode("utf-8")).hexdigest()     # 확인 시각도 글에 들어 있어서, 확인할 때마다 고쳐져요(고쳐도 알림은 안 가요)
+    if board.get("body") == body:
+        return
+    payload = json.dumps({"content": text[:1900], "username": "캠핑 빈자리 알림", "flags": 4}).encode("utf-8")
+    hdr = {"Content-Type": "application/json", "User-Agent": "CampAlert/1.0"}
+    hook = cfg["webhook"]
+    try:
+        if board.get("id"):
+            req = urllib.request.Request(f"{hook}/messages/{board['id']}", data=payload, headers=hdr, method="PATCH")
+            try:
+                urllib.request.urlopen(req, timeout=20).read()
+                board["body"] = body
+                return
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    log(f"현황판 고치기 실패: http_{e.code}")
+                    return
+                board.pop("id", None)          # 글이 지워졌으면 새로 올려요
+        req = urllib.request.Request(hook + ("&" if "?" in hook else "?") + "wait=true", data=payload, headers=hdr, method="POST")
+        with urllib.request.urlopen(req, timeout=20) as res:
+            board["id"] = json.loads(res.read().decode("utf-8"))["id"]
+        board["body"] = body
+        log("현황판을 새로 올렸어요. 디스코드에서 이 글을 길게 눌러 '고정'해 두세요.")
+    except Exception as e:
+        log(f"현황판 올리기 실패: {e}")
 
 
 # ---------------------------------------------------------------- 비모드 (비 오는 날 나들이)
@@ -1719,7 +1846,7 @@ def run_loop(cfg: dict[str, Any], once: bool = False) -> int:
                     ctx = {"cfg": cfg, "state": state, "fc": (state.get("forecast") or {}).get("d", {}),
                            "tiers": load_tiers(), "infos": load_info(), "now": datetime.now(),
                            "found": result["found"], "session": session}
-                    msgs = format_special(result["special"], holiday_set(cfg), cfg.get("strong_mention", ""), ctx)
+                    msgs = format_special(apply_daily_cap(cfg, state, result["special"], datetime.now().strftime("%Y%m%d")), holiday_set(cfg), cfg.get("strong_mention", ""), ctx)
                 else:
                     msgs = format_messages(result["new"], holidays=holiday_set(cfg))
                 for msg in msgs:
@@ -1840,7 +1967,7 @@ def run_cloud(cfg: dict[str, Any]) -> int:
             ctx = {"cfg": cfg, "state": state, "fc": (state.get("forecast") or {}).get("d", {}),
                    "tiers": load_tiers(), "infos": load_info(), "now": datetime.now(),
                    "found": result["found"], "session": session}
-            for msg in format_special(result["special"], holiday_set(cfg), cfg.get("strong_mention", ""), ctx):
+            for msg in format_special(apply_daily_cap(cfg, state, result["special"], datetime.now().strftime("%Y%m%d")), holiday_set(cfg), cfg.get("strong_mention", ""), ctx):
                 notify(cfg, msg)
                 time.sleep(1)
         else:
@@ -1866,6 +1993,12 @@ def run_cloud(cfg: dict[str, Any]) -> int:
             state["last_heartbeat"] = state["last_digest"]
         if cfg.get("rain_mode", True):
             maybe_rain(cfg, state, found=result["found"])
+        if result["ok_forests"] > 0 and cfg.get("board", True):
+            try:
+                update_board(cfg, state, format_board(cfg, result["found"], load_tiers(), load_info(), datetime.now(), holiday_set(cfg)))
+            except Exception:
+                log("현황판 오류:\n" + traceback.format_exc())
+
         if heartbeat_due(cfg, state):
             notify(cfg, f"☀️ 잘 돌아가고 있어요 · 지금 빈자리 {result['open_now']}건 · 휴양림 {result['scanned']}곳 확인")
             state["last_heartbeat"] = datetime.now().strftime("%Y%m%d")
