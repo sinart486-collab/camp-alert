@@ -1313,7 +1313,23 @@ def format_board(cfg: dict[str, Any], found: dict[str, dict[str, Any]], tiers: d
     lines.append("")
     lines.append("**⭐ 별 있는 곳 (차 옆인지는 몰라요)**")
     lines += [line(r) for r in sorted(other_rows, key=key)[:6]] or ["-# 지금은 없어요"]
+    priv = load_private_recs()
+    if priv:
+        lines.append("")
+        lines.append("**🏕️ 좋은 사설 캠핑장 (빈자리는 직접 확인하세요)**")
+        for p in priv[:6]:
+            lines.append(f"・🚗 {p.get('이름','')} · {p.get('지역','')} · {short_text(p.get('한줄',''), 34)}")
+        lines.append("-# 여기는 실시간 확인이 안 돼요. 이름으로 캠핑장 찾기 앱에서 검색해 보세요")
     return "\n".join(lines)[:1900]
+
+
+def load_private_recs() -> list[dict[str, Any]]:
+    """사설캠핑장.json에서 추천 목록을 읽어요. 실시간 빈자리는 확인하지 않아요(예약 시스템이 제각각이라서)."""
+    try:
+        data = json.loads((BASE / "사설캠핑장.json").read_text(encoding="utf-8"))
+        return [r for r in data.get("추천", []) if isinstance(r, dict)]
+    except Exception:
+        return []
 
 
 def update_board(cfg: dict[str, Any], state: dict[str, Any], text: str) -> None:
