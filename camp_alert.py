@@ -94,7 +94,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "strong_mention": "@everyone", # 세게 알릴 때 글 맨 앞에 붙이는 말 (비우면 안 붙임)
     "vip_forests": [],             # 늘 귀하게 칠 휴양림 이름 일부 (예: ["용지봉", "대운산"])
     "strict_alerts": True,         # True = 🚗차 바로 옆 + (⭐2개 이상 또는 💎 또는 💲)일 때만 알려요
-    "daily_max": 2,                # 하루에 알리는 휴양림 수 (넘치면 가장 좋은 것만)
+    "daily_max": 1,                # 하루에 알리는 휴양림 수 (넘치면 가장 좋은 것만)
+    "quiet": True,                 # True = 정말 중요한 것만 알림. '쉬었어요/다시 돼요' 같은 상태 알림·비 오는 날 추천은 끄고, 안부는 월요일 아침 한 번만
     "digest": False,               # (끔) 일요일 밤 '갈 수 있는 곳 전부' 목록. 필요하면 true
     "digest_weekday": 6,           # 6 = 일요일 (토요일 아침에는 '내일 밤', 일요일 아침에는 '오늘 밤')
     "heartbeat_hour": 8,           # 매일 이 시각 이후 '잘 돌아가고 있어요' 알림
@@ -1657,6 +1658,8 @@ def format_digest(found: dict[str, dict[str, Any]], use_dt: str, holidays: set[s
 
 def heartbeat_due(cfg: dict[str, Any], state: dict[str, Any], now: datetime | None = None) -> bool:
     now = now or datetime.now()
+    if cfg.get("quiet", True) and now.weekday() != 0:      # 조용히 모드: 안부는 월요일 아침 한 번만
+        return False
     return now.hour >= int(cfg["heartbeat_hour"]) and state.get("last_heartbeat") != now.strftime("%Y%m%d")
 
 
@@ -1928,7 +1931,8 @@ def run_cloud(cfg: dict[str, Any]) -> int:
     state = load_state()
     now_ts = time.time()
     last = state.get("last_alive")
-    if last and now_ts - last > 100 * 60 and not state.get("cloud_first", True):
+    quiet = bool(cfg.get("quiet", True))
+    if not quiet and last and now_ts - last > 100 * 60 and not state.get("cloud_first", True):
         mins = int((now_ts - last) // 60)
         human = f"{mins // 60}시간 {mins % 60}분" if mins >= 60 else f"{mins}분"
         notify(cfg, f"⚠️ 감시가 약 {human} 동안 쉬었어요 (마지막 확인 {datetime.fromtimestamp(last):%m/%d %H:%M}).\n"
@@ -1946,7 +1950,7 @@ def run_cloud(cfg: dict[str, Any]) -> int:
                 state["deeplink"] = {"date_key": pr.get("date_key", ""), "tpl": pr.get("tpl", ""), "pay_tpl": pr.get("pay_tpl", "")}
             else:
                 state["deeplink"] = {"pay_tpl": pr.get("pay_tpl", "")}
-        if state.get("login_alerted"):
+        if state.get("login_alerted") and not quiet:
             notify(cfg, "✅ 숲나들e 로그인이 다시 잘 되고 있어요. 감시를 계속합니다.")
         state["login_fails"] = 0
         state["login_alerted"] = False
@@ -1962,7 +1966,7 @@ def run_cloud(cfg: dict[str, Any]) -> int:
     except Exception:
         state["errors_in_row"] = int(state.get("errors_in_row", 0)) + 1
         log("예상 못한 오류(로그인 중):\n" + traceback.format_exc())
-        if state["errors_in_row"] == 4:
+        if state["errors_in_row"] == 4 and not quiet:
             notify(cfg, "⚠️ 숲나들e에 1시간째 들어가지지 않아요. 사이트 점검 중일 수 있어요. 저절로 다시 시도해요.")
         save_state(state)
         return 0
@@ -1971,7 +1975,7 @@ def run_cloud(cfg: dict[str, Any]) -> int:
         result = run_cycle(cfg, session, state)
         log(f"확인 끝: 휴양림 {result['scanned']}곳, 지금 빈자리 {result['open_now']}건, "
             f"새로 생김 {len(result['new'])}건, 실패 {len(result['errors'])}건")
-        if state.get("errors_in_row", 0) >= 4 and result["ok_forests"] > 0:
+        if not quiet and state.get("errors_in_row", 0) >= 4 and result["ok_forests"] > 0:
             notify(cfg, "✅ 숲나들e가 다시 열렸어요. 감시를 계속합니다.")
         state["errors_in_row"] = 0 if result["ok_forests"] > 0 else int(state.get("errors_in_row", 0)) + 1
 
@@ -2007,7 +2011,7 @@ def run_cloud(cfg: dict[str, Any]) -> int:
                 time.sleep(1)
             state["last_digest"] = datetime.now().strftime("%Y%m%d")
             state["last_heartbeat"] = state["last_digest"]
-        if cfg.get("rain_mode", True):
+        if cfg.get("rain_mode", True) and not quiet:
             maybe_rain(cfg, state, found=result["found"])
         if result["ok_forests"] > 0 and cfg.get("board", True):
             try:
